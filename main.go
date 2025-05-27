@@ -16,41 +16,47 @@ import (
 	"github.com/muesli/termenv"
 )
 
-// TerminalView wraps a PTY-backed shell session.
+// TerminalView encapsulates one shell session with output & input widgets.
 type TerminalView struct {
-	ptmx   *os.File
 	grid   *widget.TextGrid
 	scroll *container.Scroll
+	input  *widget.Entry
+	ptmx   *os.File
 }
 
-// NewTerminalView starts `shellCmd` in a pty and returns its view.
-func NewTerminalView(shellCmd string) *TerminalView {
+// NewTerminalView starts a shell PTY and returns a TerminalView.
+func NewTerminalView(shell string) *TerminalView {
 	tv := &TerminalView{
 		grid: widget.NewTextGrid(),
 	}
-	tv.grid.SetText("Starting " + shellCmd + "...\n")
+	tv.grid.SetText(fmt.Sprintf("Starting %s...\n", shell))
 	tv.scroll = container.NewVScroll(tv.grid)
+	tv.scroll.SetMinSize(fyne.NewSize(800, 500))
 
-	cmd := exec.Command(shellCmd)
+	tv.input = widget.NewEntry()
+	tv.input.SetPlaceHolder("Type a command and press Enter")
+
+	// Launch the PTY
+	cmd := exec.Command(shell)
 	var err error
 	tv.ptmx, err = pty.Start(cmd)
 	if err != nil {
-		log.Fatalf("pty.Start failed: %v", err)
+		log.Fatalf("Failed to start PTY: %v", err)
 	}
 
-	// Read loop
+	// Read loop: capture all shell output
 	go func() {
-		parser := termenv.NewOutput(io.Discard) // strips ANSI
-		r := bufio.NewReader(tv.ptmx)
+		reader := bufio.NewReader(tv.ptmx)
+		ansi := termenv.NewOutput(io.Discard)
 		for {
-			line, err := r.ReadString('\n')
+			line, err := reader.ReadString('\n')
 			if err != nil {
 				if err != io.EOF {
 					log.Println("PTY read error:", err)
 				}
 				break
 			}
-			plain := parser.String(line).String()
+			plain := ansi.String(line).String() // strip ANSI for now
 			fyne.Do(func() {
 				tv.grid.SetText(tv.grid.Text() + plain)
 				tv.scroll.ScrollToBottom()
@@ -58,12 +64,24 @@ func NewTerminalView(shellCmd string) *TerminalView {
 		}
 	}()
 
+	// Send input commands into the shell
+	tv.input.OnSubmitted = func(cmdLine string) {
+		// Show the command in the grid (like a prompt echo)
+		fyne.Do(func() {
+			tv.grid.SetText(tv.grid.Text() + "> " + cmdLine + "\n")
+			tv.scroll.ScrollToBottom()
+		})
+		// Write to PTY
+		_, _ = tv.ptmx.Write([]byte(cmdLine + "\n"))
+		tv.input.SetText("")
+	}
+
 	return tv
 }
 
-// Widget returns the scrollable output area.
+// Widget returns a container with output scroll + input bar.
 func (tv *TerminalView) Widget() fyne.CanvasObject {
-	return tv.scroll
+	return container.NewBorder(nil, tv.input, nil, nil, tv.scroll)
 }
 
 func main() {
@@ -71,42 +89,22 @@ func main() {
 	w := myApp.NewWindow("goterminal")
 	w.Resize(fyne.NewSize(1024, 768))
 
-	// Tabs and views
+	// Tab container
 	tabs := container.NewAppTabs()
 	tabs.SetTabLocation(container.TabLocationTop)
-	var views []*TerminalView
 
-	// Helper to add a new shell tab
-	addShell := func() {
-		idx := len(views) + 1
-		tv := NewTerminalView("/bin/zsh")
-		views = append(views, tv)
-		tabs.Append(container.NewTabItem(fmt.Sprintf("Shell %d", idx), tv.Widget()))
-		tabs.SelectIndex(idx - 1)
-	}
+	// Add initial shell tab
+	tabs.Append(container.NewTabItem("Shell 1", NewTerminalView("/bin/zsh").Widget()))
 
-	// Start first tab
-	addShell()
-
-	// Capture all key/rune on the window and forward to active PTY
-	w.Canvas().SetOnTypedRune(func(r rune) {
-		tv := views[tabs.CurrentTabIndex()]
-		tv.ptmx.Write([]byte(string(r)))
-	})
-	w.Canvas().SetOnTypedKey(func(ev *fyne.KeyEvent) {
-		tv := views[tabs.CurrentTabIndex()]
-		switch ev.Name {
-		case fyne.KeyEnter:
-			tv.ptmx.Write([]byte{'\r'})
-		case fyne.KeyBackspace:
-			tv.ptmx.Write([]byte{0x7f})
-		}
+	// Button to add more shells
+	newTabBtn := widget.NewButton("+", func() {
+		num := len(tabs.Items) + 1
+		title := fmt.Sprintf("Shell %d", num)
+		tabs.Append(container.NewTabItem(title, NewTerminalView("/bin/zsh").Widget()))
+		tabs.SelectIndex(len(tabs.Items) - 1)
 	})
 
-	// “+” button to spawn new tabs
-	newTab := widget.NewButton("+", addShell)
-
-	// Layout
-	w.SetContent(container.NewBorder(nil, nil, newTab, nil, tabs))
+	// Layout: tabs with “+” on left
+	w.SetContent(container.NewBorder(nil, nil, newTabBtn, nil, tabs))
 	w.ShowAndRun()
 }
