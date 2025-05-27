@@ -1,0 +1,2 @@
+# goterminal
+go version terminal
